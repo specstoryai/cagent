@@ -37,7 +37,7 @@ type editor struct {
 func New() Editor {
 	ta := textarea.New()
 	ta.SetStyles(styles.InputStyle)
-	ta.Placeholder = "Type your message here..."
+	ta.Placeholder = "Type your message here please..."
 	ta.Prompt = "│ "
 	ta.CharLimit = -1
 	ta.SetWidth(50)
