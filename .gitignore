@@ -15,3 +15,5 @@ vendor
 # Local environment files
 .env.local
 .claude/settings.local.json
+.intent/
+.intentignore
