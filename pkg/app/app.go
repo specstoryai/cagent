@@ -73,14 +73,6 @@ func (a *App) Run(ctx context.Context, cancel context.CancelFunc, message string
 		userMsg := session.UserMessage(a.agentFilename, message)
 		a.session.AddMessage(userMsg)
 
-		// Auto-save user message if session manager is enabled
-		if a.sessionManager != nil {
-			if err := a.sessionManager.SaveMessage(userMsg); err != nil {
-				// Log but don't fail
-				_ = err
-			}
-		}
-
 		for event := range a.runtime.RunStream(ctx, a.session) {
 			if ctx.Err() != nil {
 				return
@@ -88,7 +80,7 @@ func (a *App) Run(ctx context.Context, cancel context.CancelFunc, message string
 			a.events <- event
 		}
 
-		// Save entire session state after run completes
+		// Save entire session state after run completes (includes all messages)
 		if a.sessionManager != nil {
 			if err := a.sessionManager.SaveSession(a.session); err != nil {
 				// Log but don't fail
