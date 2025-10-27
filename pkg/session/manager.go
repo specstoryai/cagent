@@ -128,20 +128,26 @@ func (m *TUISessionManager) SaveMessage(msg *Message) error {
 	return nil
 }
 
-// SaveSession saves the current session state
+// SaveSession saves the current session state including all messages
 func (m *TUISessionManager) SaveSession(sess *Session) error {
 	if m.currentSess == nil {
 		return fmt.Errorf("no active session")
 	}
 
-	// Update metadata
-	m.currentSess.Metadata.MessageCount = len(sess.Messages)
-	m.currentSess.Metadata.TotalCost = sess.Cost
-	m.currentSess.Metadata.UpdatedAt = time.Now()
+	// Convert runtime Session to TUISession
+	tuiSess := FromSession(sess, m.projectPath)
 
-	// Write metadata
+	// Preserve the session ID from current session
+	tuiSess.Metadata.SessionID = m.currentSess.Metadata.SessionID
+	tuiSess.Metadata.CreatedAt = m.currentSess.Metadata.CreatedAt
+	tuiSess.Metadata.UpdatedAt = time.Now()
+
+	// Update in-memory session
+	m.currentSess = tuiSess
+
+	// Write entire session to JSONL file (overwrites)
 	path := GetSessionJSONLPath(m.projectPath, m.currentSess.Metadata.SessionID)
-	return WriteMetadata(path, &m.currentSess.Metadata)
+	return WriteSession(path, tuiSess)
 }
 
 // LoadSession loads a session by ID

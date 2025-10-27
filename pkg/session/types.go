@@ -3,6 +3,8 @@ package session
 import (
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/docker/cagent/pkg/chat"
 )
 
@@ -100,15 +102,33 @@ func FromSession(sess *Session, projectPath string) *TUISession {
 		Entries: make([]TUISessionEntry, 0, len(sess.Messages)),
 	}
 
+	// Keep track of UUIDs for parent linking
+	var lastUUID string
+
 	// Convert messages to entries
-	for i, item := range sess.Messages {
+	for _, item := range sess.Messages {
 		if item.IsMessage() {
 			msg := item.Message
+			msgUUID := uuid.New().String()
+
+			// Parse timestamp from message
+			var msgTimestamp time.Time
+			if msg.Message.CreatedAt != "" {
+				parsed, err := time.Parse(time.RFC3339, msg.Message.CreatedAt)
+				if err == nil {
+					msgTimestamp = parsed
+				} else {
+					msgTimestamp = time.Now()
+				}
+			} else {
+				msgTimestamp = time.Now()
+			}
+
 			entry := TUISessionEntry{
 				Type:          string(msg.Message.Role),
 				SessionID:     sess.ID,
-				UUID:          msg.Message.CreatedAt, // Use timestamp as UUID for now
-				Timestamp:     time.Now(),
+				UUID:          msgUUID,
+				Timestamp:     msgTimestamp,
 				CWD:           sess.WorkingDir,
 				GitBranch:     gitBranch,
 				Message:       &msg.Message,
@@ -117,11 +137,12 @@ func FromSession(sess *Session, projectPath string) *TUISession {
 			}
 
 			// Set parent UUID (link to previous message)
-			if i > 0 && sess.Messages[i-1].IsMessage() {
-				entry.ParentUUID = sess.Messages[i-1].Message.Message.CreatedAt
+			if lastUUID != "" {
+				entry.ParentUUID = lastUUID
 			}
 
 			tuiSess.Entries = append(tuiSess.Entries, entry)
+			lastUUID = msgUUID
 		}
 	}
 
