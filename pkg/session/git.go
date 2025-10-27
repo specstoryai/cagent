@@ -2,7 +2,9 @@ package session
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // isGitRepo checks if the given directory or one of its parents is a git repository
@@ -32,4 +34,23 @@ func isGitRepo(dir string) bool {
 		}
 		current = parent
 	}
+}
+
+// GetGitBranch returns the current git branch for the given directory
+func GetGitBranch(dir string) string {
+	if !isGitRepo(dir) {
+		return ""
+	}
+
+	// Run git command to get current branch
+	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd.Dir = dir
+
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+
+	branch := strings.TrimSpace(string(output))
+	return branch
 }

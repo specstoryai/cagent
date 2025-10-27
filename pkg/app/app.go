@@ -22,6 +22,7 @@ type App struct {
 	events           chan tea.Msg
 	throttleDuration time.Duration
 	cancel           context.CancelFunc
+	sessionManager   *session.TUISessionManager // TUI session manager for persistence
 }
 
 func New(title, agentFilename string, rt runtime.Runtime, agents *team.Team, sess *session.Session, firstMessage *string) *App {
@@ -49,16 +50,50 @@ func (a *App) Title() string {
 	return a.title
 }
 
+func (a *App) SetSessionManager(mgr *session.TUISessionManager) {
+	a.sessionManager = mgr
+}
+
+func (a *App) SessionManager() *session.TUISessionManager {
+	return a.sessionManager
+}
+
+func (a *App) Session() *session.Session {
+	return a.session
+}
+
+func (a *App) SetSession(sess *session.Session) {
+	a.session = sess
+}
+
 // Run one agent loop
 func (a *App) Run(ctx context.Context, cancel context.CancelFunc, message string) {
 	a.cancel = cancel
 	go func() {
-		a.session.AddMessage(session.UserMessage(a.agentFilename, message))
+		userMsg := session.UserMessage(a.agentFilename, message)
+		a.session.AddMessage(userMsg)
+
+		// Auto-save user message if session manager is enabled
+		if a.sessionManager != nil {
+			if err := a.sessionManager.SaveMessage(userMsg); err != nil {
+				// Log but don't fail
+				_ = err
+			}
+		}
+
 		for event := range a.runtime.RunStream(ctx, a.session) {
 			if ctx.Err() != nil {
 				return
 			}
 			a.events <- event
+		}
+
+		// Save entire session state after run completes
+		if a.sessionManager != nil {
+			if err := a.sessionManager.SaveSession(a.session); err != nil {
+				// Log but don't fail
+				_ = err
+			}
 		}
 	}()
 }
