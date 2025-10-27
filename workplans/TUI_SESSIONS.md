@@ -1,8 +1,8 @@
-# TUI Session Persistence and Resume - Design Document
+# TUI Session Persistence and Resume - Design Document (JSONL-Only)
 
 ## Overview
 
-This document outlines the design for implementing session persistence and resume functionality in the cagent TUI, modeled after Claude Code CLI's architecture.
+This document outlines the design for implementing session persistence and resume functionality in the cagent TUI using **JSONL files only** - no SQLite database.
 
 ## Current State
 
@@ -16,164 +16,85 @@ This document outlines the design for implementing session persistence and resum
 - Sessions stored in SQLite (`session.db`)
 - Full REST API for session management
 - Sessions include: ID, title, messages, tokens, cost, timestamps
+- **Note:** TUI will NOT use the API server's SQLite database
 
-## Claude Code CLI Architecture Study
+## Design Philosophy
+
+**Simplicity First:**
+- Single storage format (JSONL)
+- File-system based discovery
+- No database overhead
+- Human-readable and portable
+- Easy to backup/share/version control
 
 ### Storage Location
 ```
-~/.claude/
-├── __store.db                    # SQLite database for all messages
-├── history.jsonl                 # Global command history log
-├── projects/                     # Per-project session storage
-│   └── -Users-jakelevirne-dev-project/
-│       ├── {uuid}.jsonl          # Session files
-│       └── {uuid}.jsonl
-├── session-env/                  # Session environment state
-├── file-history/                 # File change tracking per session
-└── settings.json                 # User preferences
+~/.cagent/
+└── sessions/                     # JSONL session files
+    └── {encoded-project-path}/
+        ├── {uuid}.jsonl          # Session files
+        └── {uuid}.jsonl
 ```
 
-### Key Design Patterns
+### Key Design Pattern: JSONL-Only Storage
 
-#### 1. Dual Storage System
-**SQLite Database (`__store.db`)**
-- Structured queries (search by session_id, project, date)
-- Cost/usage tracking
-- Conversation summaries for quick display
-- Efficient indexing
-
-**JSONL Files (`projects/{encoded-path}/{uuid}.jsonl`)**
+**JSONL Files (`sessions/{encoded-path}/{uuid}.jsonl`)**
 - Raw conversation data (one JSON object per line)
+- First line contains session metadata
+- Subsequent lines are messages
 - Human-readable and portable
 - Easy to backup/share
 - Direct replay capability
+- No database required
 
-#### 2. Session Tree Structure
-```javascript
-{
-  uuid: "message-uuid",              // This message's ID
-  parentUuid: "parent-message-uuid", // Links to parent (conversation tree)
-  sessionId: "session-uuid",         // Which session this belongs to
-  timestamp: "2025-10-24T17:15:39.798Z",
-  type: "user" | "assistant",
-  message: { /* actual message content */ }
-}
-```
+## Session Data Structure
 
-**Benefits:**
-- Non-linear conversations (branching)
-- Multiple children per parent message
-- Easy to find conversation leaf nodes
-- Natural undo/redo through tree traversal
-
-#### 3. Per-Project Organization
-- Project paths encoded in directory names: `/Users/foo/bar` → `-Users-foo-bar`
-- All sessions for a project in one directory
-- Easy to list sessions for current working directory
-- Git branch tracking per message
-
-#### 4. Rich Metadata Tracking
-Every message records:
-- `cwd`: Working directory at time of message
-- `version`: cagent version
-- `gitBranch`: Git branch (if in repo)
-- `timestamp`: ISO 8601 timestamp
-- `cost_usd`: API cost (assistant messages)
-- `duration_ms`: Response time
-- `model`: Model used
-
-### Session Data Structures
-
-#### SQLite Schema (Simplified for cagent)
-
-**sessions table:**
-```sql
-CREATE TABLE sessions (
-  id TEXT PRIMARY KEY,              -- UUID
-  project_path TEXT NOT NULL,       -- /Users/jakelevirne/dev/cagent
-  title TEXT,                       -- AI-generated summary
-  created_at TEXT NOT NULL,         -- ISO timestamp
-  updated_at TEXT NOT NULL,         -- ISO timestamp
-  git_branch TEXT,                  -- Current branch at creation
-  total_cost REAL DEFAULT 0,        -- Total API cost
-  message_count INTEGER DEFAULT 0,  -- Number of messages
-  working_dir TEXT                  -- Working directory
-);
-
-CREATE INDEX idx_sessions_project ON sessions(project_path);
-CREATE INDEX idx_sessions_updated ON sessions(updated_at DESC);
-```
-
-**messages table:**
-```sql
-CREATE TABLE messages (
-  uuid TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL,
-  parent_uuid TEXT,                 -- NULL for first message
-  timestamp TEXT NOT NULL,
-  role TEXT NOT NULL,               -- 'user', 'assistant', 'system', 'tool'
-  content TEXT NOT NULL,            -- JSON string of message content
-  model TEXT,                       -- Model used (assistant messages)
-  input_tokens INTEGER,
-  output_tokens INTEGER,
-  cost REAL,
-  duration_ms INTEGER,
-
-  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE,
-  FOREIGN KEY(parent_uuid) REFERENCES messages(uuid)
-);
-
-CREATE INDEX idx_messages_session ON messages(session_id);
-CREATE INDEX idx_messages_timestamp ON messages(timestamp);
-```
-
-#### JSONL File Format
+### JSONL File Format
 
 Each line is a complete JSON object (newline-delimited JSON):
 
+**Line 1: Session Metadata**
+```json
+{"type":"session_metadata","sessionId":"7762b05e-...","projectPath":"/Users/jake/dev/cagent","title":"Code refactoring assistance","createdAt":"2025-10-24T17:15:39.798Z","updatedAt":"2025-10-24T17:16:00.000Z","gitBranch":"main","messageCount":2,"totalCost":0.0023}
+```
+
+**Subsequent Lines: Messages**
 ```jsonl
 {"type":"user","sessionId":"7762b05e-...","parentUuid":null,"uuid":"78dafb20-...","timestamp":"2025-10-24T17:15:39.798Z","cwd":"/Users/jake/dev/cagent","gitBranch":"main","message":{"role":"user","content":"help me refactor this code"}}
 {"type":"assistant","sessionId":"7762b05e-...","parentUuid":"78dafb20-...","uuid":"15aaa2c9-...","timestamp":"2025-10-24T17:15:43.235Z","model":"anthropic/claude-sonnet-4-0","cost":0.0023,"inputTokens":1234,"outputTokens":567,"message":{"role":"assistant","content":"I'll help you refactor..."}}
-{"type":"summary","sessionId":"7762b05e-...","leafUuid":"15aaa2c9-...","summary":"Code refactoring assistance for main.go","timestamp":"2025-10-24T17:16:00.000Z"}
 ```
 
 **Benefits of JSONL:**
 - Append-only (just add new lines)
+- First line = metadata (updated on changes)
 - Can stream parse without loading entire file
 - Grep-able for debugging
 - Easy to merge/split sessions
 - Each line is independently valid JSON
-
-## Proposed Implementation for cagent TUI
+- No database required
 
 ### Directory Structure
 
 ```
 ~/.cagent/
-├── sessions.db                   # SQLite database (reuse existing schema mostly)
-├── sessions/                     # JSONL session files
-│   └── {encoded-project-path}/
-│       ├── {session-uuid}.jsonl
-│       └── {session-uuid}.jsonl
-└── settings.json                 # TUI preferences (optional, future)
+└── sessions/                     # JSONL session files only
+    └── {encoded-project-path}/
+        ├── {session-uuid}.jsonl
+        └── {session-uuid}.jsonl
 ```
 
-### Storage Strategy
+### Session Discovery
 
-#### Why Dual Storage?
+**How to find sessions:**
+1. List `.jsonl` files in `~/.cagent/sessions/{encoded-project-path}/`
+2. Read first line of each file (session metadata)
+3. Sort by `updatedAt` timestamp
+4. Display in session selector
 
-1. **SQLite for queries:**
-   - "Show me all sessions from last week"
-   - "What sessions exist for this project?"
-   - "What was the total cost across all sessions?"
-   - Fast session listing and filtering
-
-2. **JSONL for replay:**
-   - Complete conversation history
-   - Human-readable backup format
-   - Can be version controlled
-   - Easy to debug or manually edit
-   - Portable between machines
+**Fast session listing:**
+- Only read first line of each file for metadata
+- Full message history loaded only when resuming
+- File modification time as fallback for sorting
 
 ### User Workflows
 
@@ -188,9 +109,9 @@ cagent run config.yaml --continue
 
 **UI Flow:**
 1. Check if sessions exist for current project path
-2. If `--continue`: auto-resume most recent session
+2. If `--continue`: auto-resume most recent session (by file mtime or metadata)
 3. If `--resume`: show session selection dialog
-4. Load session from JSONL + SQLite
+4. Load session from JSONL (read all lines)
 5. Display conversation history in TUI
 6. Allow continuation
 
@@ -230,16 +151,15 @@ cagent run config.yaml --continue
 #### Workflow 3: Auto-save During Session
 
 **Behavior:**
-- Every message automatically persisted to both SQLite and JSONL
+- Every message automatically persisted to JSONL
 - No explicit "save" action needed
-- Write-ahead logging in SQLite prevents data loss
 - Append-only JSONL writes are atomic
 
 **Implementation Points:**
-1. After user sends message → append to JSONL, insert into DB
-2. After assistant responds → append to JSONL, insert into DB, update session cost/tokens
-3. On graceful exit → update session `updated_at` timestamp
-4. On crash → session remains valid with all completed messages
+1. After user sends message → append to JSONL
+2. After assistant responds → append to JSONL, update metadata line (rewrite first line)
+3. On graceful exit → update session metadata line with final `updatedAt` timestamp
+4. On crash → session remains valid with all completed messages (metadata may be stale)
 
 ### Command Palette Integration
 
@@ -303,12 +223,13 @@ Add to existing command palette (`pkg/tui/tui.go:292`):
 func CreateSession(projectPath string, agentName string) (*Session, error) {
     sessionID := uuid.New().String()
     gitBranch := getGitBranch(projectPath) // helper function
+    now := time.Now()
 
     sess := &Session{
         ID:          sessionID,
         ProjectPath: projectPath,
-        CreatedAt:   time.Now(),
-        UpdatedAt:   time.Now(),
+        CreatedAt:   now,
+        UpdatedAt:   now,
         GitBranch:   gitBranch,
         WorkingDir:  projectPath,
         Messages:    []Item{},
@@ -320,8 +241,8 @@ func CreateSession(projectPath string, agentName string) (*Session, error) {
         return nil, err
     }
 
-    // 2. Insert into SQLite
-    if err := sessionStore.AddSession(ctx, sess); err != nil {
+    // 2. Write initial metadata line
+    if err := sess.WriteMetadata(); err != nil {
         return nil, err
     }
 
@@ -336,7 +257,7 @@ func (s *Session) AppendMessage(msg *Message) error {
     // 1. Add to in-memory session
     s.Messages = append(s.Messages, NewMessageItem(msg))
 
-    // 2. Append to JSONL file (atomic write)
+    // 2. Append message to JSONL file (atomic write)
     jsonlPath := getSessionJSONLPath(s.ProjectPath, s.ID)
     entry := SessionEntry{
         Type:       msg.Role,
@@ -353,41 +274,48 @@ func (s *Session) AppendMessage(msg *Message) error {
         return fmt.Errorf("failed to append to JSONL: %w", err)
     }
 
-    // 3. Insert into SQLite
-    if err := sessionStore.AddMessage(ctx, s.ID, msg); err != nil {
-        return fmt.Errorf("failed to insert into DB: %w", err)
-    }
-
-    // 4. Update session metadata
+    // 3. Update session metadata
     s.UpdatedAt = time.Now()
     s.MessageCount++
     if msg.Cost > 0 {
         s.TotalCost += msg.Cost
     }
 
-    return sessionStore.UpdateSession(ctx, s)
+    // 4. Rewrite first line with updated metadata
+    return s.WriteMetadata()
 }
 ```
 
 #### Loading a Session
 
 ```go
-func LoadSession(sessionID string) (*Session, error) {
-    // 1. Load metadata from SQLite
-    sess, err := sessionStore.GetSession(ctx, sessionID)
-    if err != nil {
-        return nil, err
-    }
-
-    // 2. Load full conversation from JSONL
-    jsonlPath := getSessionJSONLPath(sess.ProjectPath, sessionID)
+func LoadSession(sessionID, projectPath string) (*Session, error) {
+    // 1. Read JSONL file
+    jsonlPath := getSessionJSONLPath(projectPath, sessionID)
     entries, err := readJSONL(jsonlPath)
     if err != nil {
         return nil, err
     }
 
-    // 3. Reconstruct message tree
-    messages := reconstructMessageTree(entries)
+    if len(entries) == 0 {
+        return nil, fmt.Errorf("empty session file")
+    }
+
+    // 2. First line is metadata
+    metadata := entries[0]
+    sess := &Session{
+        ID:          metadata.SessionID,
+        ProjectPath: metadata.ProjectPath,
+        Title:       metadata.Title,
+        CreatedAt:   metadata.CreatedAt,
+        UpdatedAt:   metadata.UpdatedAt,
+        GitBranch:   metadata.GitBranch,
+        MessageCount: metadata.MessageCount,
+        TotalCost:   metadata.TotalCost,
+    }
+
+    // 3. Remaining lines are messages
+    messages := reconstructMessages(entries[1:])
     sess.Messages = messages
 
     return sess, nil
@@ -400,25 +328,53 @@ func LoadSession(sessionID string) (*Session, error) {
 // Triggered after N messages or on session close
 func (s *Session) GenerateSummary(model provider.Provider) error {
     // Use existing summarization logic from pkg/runtime/runtime.go:1011
-    // Similar to generateSessionTitle but for summary
-
     summary := s.generateSummaryViaLLM(model)
     s.Title = summary
 
-    // Update both storages
-    sessionStore.UpdateSession(ctx, s)
+    // Update metadata line
+    return s.WriteMetadata()
+}
+```
 
-    // Append summary entry to JSONL
-    summaryEntry := SessionEntry{
-        Type:      "summary",
-        SessionID: s.ID,
-        LeafUUID:  s.getLastMessageUUID(),
-        Summary:   summary,
-        Timestamp: time.Now(),
+#### Writing Metadata (Rewriting First Line)
+
+```go
+func (s *Session) WriteMetadata() error {
+    jsonlPath := getSessionJSONLPath(s.ProjectPath, s.ID)
+
+    metadata := SessionMetadata{
+        Type:         "session_metadata",
+        SessionID:    s.ID,
+        ProjectPath:  s.ProjectPath,
+        Title:        s.Title,
+        CreatedAt:    s.CreatedAt,
+        UpdatedAt:    s.UpdatedAt,
+        GitBranch:    s.GitBranch,
+        MessageCount: s.MessageCount,
+        TotalCost:    s.TotalCost,
     }
-    appendJSONL(getSessionJSONLPath(s.ProjectPath, s.ID), summaryEntry)
 
-    return nil
+    // Read all lines
+    lines, err := readAllLines(jsonlPath)
+    if err != nil && !os.IsNotExist(err) {
+        return err
+    }
+
+    // Marshal new metadata
+    metadataJSON, err := json.Marshal(metadata)
+    if err != nil {
+        return err
+    }
+
+    // Replace first line or create new file
+    if len(lines) > 0 {
+        lines[0] = string(metadataJSON)
+    } else {
+        lines = []string{string(metadataJSON)}
+    }
+
+    // Write back atomically
+    return atomicWriteLines(jsonlPath, lines)
 }
 ```
 
@@ -481,7 +437,7 @@ func getProjectSessions(projectPath string) ([]string, error) {
 func New(a *app.App, opts ...TUIOption) tea.Model {
     cfg := &tuiConfig{
         enablePersistence: true,  // default on
-        sessionDBPath:     "",    // use default
+        projectPath:       "",    // use CWD by default
     }
 
     for _, opt := range opts {
@@ -490,7 +446,7 @@ func New(a *app.App, opts ...TUIOption) tea.Model {
 
     var sessionMgr *session.Manager
     if cfg.enablePersistence {
-        sm, err := session.NewManager(cfg.sessionDBPath)
+        sm, err := session.NewManager(cfg.projectPath)
         if err != nil {
             slog.Warn("Failed to initialize session manager, persistence disabled", "error", err)
         } else {
@@ -515,28 +471,20 @@ func New(a *app.App, opts ...TUIOption) tea.Model {
 
 ```go
 type Manager struct {
-    store        Store
     currentSess  *Session
     projectPath  string
     autoSave     bool
     jsonlWriter  *JSONLWriter
 }
 
-func NewManager(dbPath string) (*Manager, error) {
-    if dbPath == "" {
-        dbPath = getSessionsDBPath()
+func NewManager(projectPath string) (*Manager, error) {
+    if projectPath == "" {
+        cwd, _ := os.Getwd()
+        projectPath = cwd
     }
-
-    store, err := NewSQLiteSessionStore(dbPath)
-    if err != nil {
-        return nil, err
-    }
-
-    cwd, _ := os.Getwd()
 
     return &Manager{
-        store:       store,
-        projectPath: cwd,
+        projectPath: projectPath,
         autoSave:    true,
     }, nil
 }
@@ -553,7 +501,7 @@ func (m *Manager) CreateNewSession(agentName string) (*Session, error) {
 }
 
 func (m *Manager) ResumeSession(sessionID string) (*Session, error) {
-    sess, err := LoadSession(sessionID)
+    sess, err := LoadSession(sessionID, m.projectPath)
     if err != nil {
         return nil, err
     }
@@ -571,8 +519,64 @@ func (m *Manager) AppendMessage(msg *Message) error {
 }
 
 func (m *Manager) ListSessions() ([]*SessionMetadata, error) {
-    // Query SQLite for sessions in current project
-    return m.store.GetSessionsByProject(ctx, m.projectPath)
+    // List JSONL files in project directory
+    encoded := encodeProjectPath(m.projectPath)
+    dir := filepath.Join(getBaseSessionDir(), "sessions", encoded)
+
+    entries, err := os.ReadDir(dir)
+    if err != nil {
+        if os.IsNotExist(err) {
+            return []*SessionMetadata{}, nil
+        }
+        return nil, err
+    }
+
+    var sessions []*SessionMetadata
+    for _, entry := range entries {
+        if filepath.Ext(entry.Name()) != ".jsonl" {
+            continue
+        }
+
+        // Read first line (metadata) only
+        sessionID := strings.TrimSuffix(entry.Name(), ".jsonl")
+        metadata, err := readSessionMetadata(m.projectPath, sessionID)
+        if err != nil {
+            slog.Warn("Failed to read session metadata", "sessionID", sessionID, "error", err)
+            continue
+        }
+
+        sessions = append(sessions, metadata)
+    }
+
+    // Sort by UpdatedAt descending
+    sort.Slice(sessions, func(i, j int) bool {
+        return sessions[i].UpdatedAt.After(sessions[j].UpdatedAt)
+    })
+
+    return sessions, nil
+}
+
+func readSessionMetadata(projectPath, sessionID string) (*SessionMetadata, error) {
+    jsonlPath := getSessionJSONLPath(projectPath, sessionID)
+
+    // Read only first line
+    file, err := os.Open(jsonlPath)
+    if err != nil {
+        return nil, err
+    }
+    defer file.Close()
+
+    scanner := bufio.NewScanner(file)
+    if !scanner.Scan() {
+        return nil, fmt.Errorf("empty file")
+    }
+
+    var metadata SessionMetadata
+    if err := json.Unmarshal(scanner.Bytes(), &metadata); err != nil {
+        return nil, err
+    }
+
+    return &metadata, nil
 }
 ```
 
@@ -763,17 +767,17 @@ func (d *sessionSelectorDialog) View() string {
 - [ ] Create `pkg/session/manager.go`
 - [ ] Create `pkg/session/jsonl.go` with JSONL read/write
 - [ ] Create `pkg/session/paths.go` with path helpers
-- [ ] Extend SQLite schema with new fields (git_branch, project_path)
+- [ ] Create `pkg/session/types.go` for session data structures
 - [ ] Add CLI flags: `--resume`, `--continue`, `--no-session`
 
 ### Phase 2: Session Persistence (Week 2)
 - [ ] Integrate session manager into TUI initialization
 - [ ] Auto-save messages to JSONL on send
-- [ ] Auto-save to SQLite on send
+- [ ] Implement metadata line rewriting
 - [ ] Test crash recovery and data integrity
 
 ### Phase 3: Session Loading (Week 3)
-- [ ] Implement session listing queries
+- [ ] Implement session file discovery (filesystem-based)
 - [ ] Create session selector dialog UI
 - [ ] Implement session resume logic
 - [ ] Test loading sessions with various message counts
@@ -782,7 +786,7 @@ func (d *sessionSelectorDialog) View() string {
 - [ ] Add session rename functionality
 - [ ] Add session delete with confirmation
 - [ ] Implement fuzzy search in session selector
-- [ ] Add session export/import
+- [ ] Add session export (copy JSONL file)
 - [ ] Write documentation
 
 ## Testing Strategy
@@ -798,13 +802,21 @@ func TestJSONLConcurrentWrites(t *testing.T) {
     // Ensure thread-safe appends
 }
 
+func TestMetadataRewrite(t *testing.T) {
+    // Test updating first line without corrupting subsequent lines
+}
+
 // pkg/session/manager_test.go
 func TestSessionCreation(t *testing.T) {
-    // Create session, verify DB + JSONL
+    // Create session, verify JSONL file exists with metadata
 }
 
 func TestSessionResume(t *testing.T) {
-    // Load session, verify message tree reconstruction
+    // Load session, verify message reconstruction
+}
+
+func TestSessionListing(t *testing.T) {
+    // Create multiple sessions, verify listing and sorting
 }
 ```
 
@@ -815,54 +827,65 @@ func TestTUISessionPersistence(t *testing.T) {
     // 1. Start TUI
     // 2. Send messages
     // 3. Exit TUI
-    // 4. Verify JSONL and SQLite have data
+    // 4. Verify JSONL file has all data
     // 5. Resume TUI with --continue
     // 6. Verify messages loaded correctly
 }
 ```
 
 ### Manual Testing Checklist
-- [ ] Create session, send messages, verify both storages updated
+- [ ] Create session, send messages, verify JSONL updated
 - [ ] Kill TUI process, verify data persisted
 - [ ] Resume session, verify all messages present
 - [ ] Test with multiple projects
 - [ ] Test with empty session history
 - [ ] Test session search/filter
 - [ ] Test session deletion
-- [ ] Test with SQLite locked (concurrent access)
+- [ ] Test metadata updates don't corrupt message lines
 
 ## Benefits
 
 1. **User Experience**
    - No lost context on crashes or exits
    - Resume conversations naturally
-   - Search past conversations
-   - See cost/token usage over time
+   - Search past conversations by reading files
+   - See cost/token usage in session metadata
 
-2. **Development**
-   - Debugging: can replay sessions
+2. **Simplicity**
+   - No database setup or management
+   - Single file format (JSONL)
+   - Human-readable session files
+   - No schema migrations
+
+3. **Development**
+   - Debugging: can replay sessions easily
    - Testing: can save and load test scenarios
-   - Analysis: query patterns in SQLite
+   - Analysis: grep/jq for pattern searching
+   - Easy to inspect session files manually
 
-3. **Portability**
+4. **Portability**
    - JSONL files are human-readable
    - Can be version controlled
-   - Easy to backup/restore
-   - Share sessions with team members
+   - Easy to backup/restore (just copy files)
+   - Share sessions with team members (send .jsonl file)
+   - No database dependencies
 
 ## Risks and Mitigations
 
-### Risk: Database Lock Contention
-**Mitigation:** Use WAL mode in SQLite (already configured), single connection pool
-
 ### Risk: Large JSONL Files
-**Mitigation:** Monitor file sizes, implement session splitting after N messages
+**Mitigation:** Monitor file sizes, implement session splitting after N messages, lazy loading
+
+### Risk: Slow Session Listing with Many Sessions
+**Mitigation:** Only read first line (metadata) of each file, cache file mtimes, limit displayed sessions
 
 ### Risk: Corrupted JSONL
-**Mitigation:** Each line is independent JSON, can skip bad lines, SQLite is source of truth
+**Mitigation:** Each line is independent JSON, can skip bad lines, metadata can be rebuilt from messages
 
 ### Risk: Disk Space Usage
 **Mitigation:** Add cleanup command for old sessions, compress archived sessions
+
+### Risk: Metadata Line Rewrite Performance
+**Mitigation:** Batch metadata updates, only rewrite on significant changes (every N messages), use atomic writes
 
 ## Future Enhancements
 
@@ -888,20 +911,27 @@ func TestTUISessionPersistence(t *testing.T) {
 
 ## References
 
-- Claude Code CLI architecture study (above)
-- Existing cagent session code: `pkg/session/`
-- SQLite session store: `pkg/session/store.go`
+- Claude Code CLI architecture study (JSONL storage pattern)
+- Existing cagent session code: `pkg/session/` (API server, not used by TUI)
 - TUI dialog system: `pkg/tui/dialog/`
 - Runtime session management: `pkg/runtime/runtime.go`
+- JSONL format: http://jsonlines.org/
 
 ## Appendix: Example JSONL Session
 
+Example of a complete session file (`~/.cagent/sessions/-Users-jake-dev-cagent/a1b2c3d4-e5f6-7890-abcd-ef1234567890.jsonl`):
+
 ```jsonl
+{"type":"session_metadata","sessionId":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","projectPath":"/Users/jake/dev/cagent","title":"Added session persistence design","createdAt":"2025-10-24T10:00:00Z","updatedAt":"2025-10-24T10:05:15Z","gitBranch":"main","messageCount":4,"totalCost":0.0034}
 {"type":"user","sessionId":"a1b2c3d4-...","parentUuid":null,"uuid":"msg-001","timestamp":"2025-10-24T10:00:00Z","cwd":"/Users/jake/dev/cagent","gitBranch":"main","message":{"role":"user","content":"Help me add session persistence"}}
 {"type":"assistant","sessionId":"a1b2c3d4-...","parentUuid":"msg-001","uuid":"msg-002","timestamp":"2025-10-24T10:00:05Z","model":"anthropic/claude-sonnet-4-0","cost":0.0034,"inputTokens":1523,"outputTokens":892,"duration":5231,"message":{"role":"assistant","content":"I'll help you add session persistence..."}}
 {"type":"tool_call","sessionId":"a1b2c3d4-...","parentUuid":"msg-002","uuid":"msg-003","timestamp":"2025-10-24T10:00:10Z","toolName":"read_file","toolArgs":"{\"path\":\"pkg/session/session.go\"}"}
 {"type":"tool_result","sessionId":"a1b2c3d4-...","parentUuid":"msg-003","uuid":"msg-004","timestamp":"2025-10-24T10:00:11Z","toolCallId":"msg-003","result":"... file contents ..."}
-{"type":"summary","sessionId":"a1b2c3d4-...","leafUuid":"msg-004","summary":"Added session persistence design based on Claude Code architecture","timestamp":"2025-10-24T10:05:00Z"}
 ```
 
-Each line is a complete, valid JSON object that can be parsed independently.
+**Key Points:**
+- **Line 1:** Session metadata (updated whenever session changes)
+- **Lines 2+:** Messages in chronological order
+- Each line is a complete, valid JSON object that can be parsed independently
+- To list sessions: read only first line of each `.jsonl` file
+- To resume session: read all lines and reconstruct message history
