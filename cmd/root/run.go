@@ -43,6 +43,11 @@ var (
 	dryRun         bool
 	commandName    string
 	modelOverrides []string
+
+	// Session management flags
+	resumeSession   string
+	continueSession bool
+	noSession       bool
 )
 
 const commandListSentinel = "__LIST__"
@@ -73,6 +78,12 @@ func NewRunCmd() *cobra.Command {
 		// Allow `-c` without value to list available commands
 		f.NoOptDefVal = commandListSentinel
 	}
+
+	// Session management flags
+	cmd.PersistentFlags().StringVar(&resumeSession, "resume", "", "Resume a specific session by ID")
+	cmd.PersistentFlags().BoolVar(&continueSession, "continue", false, "Continue the most recent session")
+	cmd.PersistentFlags().BoolVar(&noSession, "no-session", false, "Disable session persistence")
+
 	addGatewayFlags(cmd)
 	addRuntimeConfigFlags(cmd)
 
@@ -356,7 +367,59 @@ func doRunCommand(ctx context.Context, args []string, exec bool) error {
 		firstMessage = commandFirstMessage
 	}
 
+	// Initialize session manager for TUI (unless --no-session is set)
+	var sessionMgr *session.TUISessionManager
+	if !noSession {
+		// Get working directory for session manager
+		sessionWorkingDir := workingDir
+		if sessionWorkingDir == "" {
+			sessionWorkingDir, _ = os.Getwd()
+		}
+
+		var err error
+		sessionMgr, err = session.NewTUISessionManager(sessionWorkingDir)
+		if err != nil {
+			slog.Warn("Failed to initialize session manager, persistence disabled", "error", err)
+		} else {
+			// Handle --resume flag
+			if resumeSession != "" {
+				loadedSess, err := sessionMgr.LoadSession(resumeSession)
+				if err != nil {
+					return fmt.Errorf("failed to load session %s: %w", resumeSession, err)
+				}
+				sess = loadedSess
+				slog.Info("Resumed session", "session_id", resumeSession)
+			} else if continueSession {
+				// Handle --continue flag
+				loadedSess, err := sessionMgr.GetMostRecentSession()
+				if err != nil {
+					slog.Warn("No sessions found to continue, starting new session", "error", err)
+					// Create new session instead
+					sess, err = sessionMgr.CreateNewSession(agentName)
+					if err != nil {
+						slog.Warn("Failed to create new session", "error", err)
+					}
+				} else {
+					sess = loadedSess
+					slog.Info("Continuing most recent session", "session_id", sessionMgr.GetCurrentSessionID())
+				}
+			} else {
+				// Create new session
+				sess, err = sessionMgr.CreateNewSession(agentName)
+				if err != nil {
+					slog.Warn("Failed to create new session", "error", err)
+				}
+			}
+		}
+	}
+
 	a := app.New("cagent", agentFilename, rt, agents, sess, firstMessage)
+
+	// Attach session manager to app
+	if sessionMgr != nil {
+		a.SetSessionManager(sessionMgr)
+	}
+
 	m := tui.New(a)
 
 	progOpts := []tea.ProgramOption{

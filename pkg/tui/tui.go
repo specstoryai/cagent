@@ -210,6 +210,10 @@ func (a *appModel) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 	switch {
 	case key.Matches(msg, a.keyMap.Quit):
 		a.chatPage.Cleanup()
+		// Close session manager if it exists
+		if sessionMgr := a.application.SessionManager(); sessionMgr != nil {
+			_ = sessionMgr.Close()
+		}
 		return tea.Quit
 	case key.Matches(msg, a.keyMap.CommandPalette):
 		// Open command palette
