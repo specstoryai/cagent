@@ -15,6 +15,7 @@ import (
 	"github.com/docker/cagent/pkg/app"
 	"github.com/docker/cagent/pkg/runtime"
 	"github.com/docker/cagent/pkg/tui/components/editor"
+	"github.com/docker/cagent/pkg/tui/components/filepicker"
 	"github.com/docker/cagent/pkg/tui/components/messages"
 	"github.com/docker/cagent/pkg/tui/components/sidebar"
 	"github.com/docker/cagent/pkg/tui/core"
@@ -48,9 +49,10 @@ type chatPage struct {
 	sessionTitle  string
 
 	// Components
-	sidebar  sidebar.Model
-	messages messages.Model
-	editor   editor.Editor
+	sidebar    sidebar.Model
+	messages   messages.Model
+	editor     editor.Editor
+	filePicker *filepicker.Model
 
 	// State
 	focusedPanel FocusedPanel
@@ -91,11 +93,18 @@ func defaultKeyMap() KeyMap {
 
 // New creates a new chat page
 func New(a *app.App) Page {
+	// Get working directory from app
+	workDir, err := os.Getwd()
+	if err != nil {
+		workDir = "."
+	}
+
 	return &chatPage{
 		title:        a.Title(),
 		sidebar:      sidebar.New(),
 		messages:     messages.New(a),
 		editor:       editor.New(),
+		filePicker:   filepicker.New(workDir),
 		focusedPanel: PanelEditor,
 		app:          a,
 		keyMap:       defaultKeyMap(),
@@ -148,6 +157,13 @@ func (p *chatPage) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return p, tea.Batch(cmds...)
 
 	case tea.KeyPressMsg:
+		// If file picker is visible, route keys to it first
+		if p.filePicker.IsVisible() {
+			var cmd tea.Cmd
+			p.filePicker, cmd = p.filePicker.Update(msg)
+			return p, cmd
+		}
+
 		switch {
 		case key.Matches(msg, p.keyMap.Tab):
 			p.switchFocus()
@@ -177,6 +193,21 @@ func (p *chatPage) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		model, cmd := p.messages.Update(msg)
 		p.messages = model.(messages.Model)
 		return p, cmd
+
+	case editor.ShowFilePickerMsg:
+		// Show file picker and set its size
+		p.filePicker.SetVisible(true)
+		p.filePicker.SetSize(p.width, p.height)
+		return p, nil
+
+	case filepicker.FileSelectedMsg:
+		// File selected from picker, insert into editor
+		cmd := core.CmdHandler(editor.InsertTextMsg{Text: msg.Path})
+		return p, cmd
+
+	case filepicker.FilePickerCancelledMsg:
+		// File picker cancelled, do nothing
+		return p, nil
 
 	case editor.SendMsg:
 		cmd := p.processMessage(msg.Content)
@@ -304,6 +335,13 @@ func (p *chatPage) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	}
 
+	// Update file picker if visible
+	if p.filePicker.IsVisible() {
+		var filePickerCmd tea.Cmd
+		p.filePicker, filePickerCmd = p.filePicker.Update(msg)
+		cmds = append(cmds, filePickerCmd)
+	}
+
 	sidebarModel, sidebarCmd := p.sidebar.Update(msg)
 	p.sidebar = sidebarModel.(sidebar.Model)
 	cmds = append(cmds, sidebarCmd)
@@ -365,9 +403,17 @@ func (p *chatPage) View() string {
 		input,
 	)
 
-	return styles.AppStyle.
+	mainView := styles.AppStyle.
 		Height(p.height).
 		Render(content)
+
+	// If file picker is visible, overlay it on top
+	if p.filePicker.IsVisible() {
+		// The file picker handles its own positioning and overlay
+		return p.filePicker.View()
+	}
+
+	return mainView
 }
 
 // SetSize sets the dimensions of the chat page
