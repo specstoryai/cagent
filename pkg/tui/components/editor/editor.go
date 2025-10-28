@@ -16,6 +16,14 @@ type SendMsg struct {
 	Content string
 }
 
+// ShowFilePickerMsg is sent when @ is typed to trigger file picker
+type ShowFilePickerMsg struct{}
+
+// InsertTextMsg is sent to insert text at the cursor position
+type InsertTextMsg struct {
+	Text string
+}
+
 // Editor represents an input editor component
 type Editor interface {
 	layout.Model
@@ -27,10 +35,12 @@ type Editor interface {
 
 // editor implements Editor
 type editor struct {
-	textarea *textarea.Model
-	width    int
-	height   int
-	working  bool
+	textarea        *textarea.Model
+	width           int
+	height          int
+	working         bool
+	lastCharWasAt   bool // Track if last character typed was @
+	atSymbolPos     int  // Position where @ was inserted
 }
 
 // New creates a new editor component
@@ -59,9 +69,15 @@ func (e *editor) Init() tea.Cmd {
 // Update handles messages and updates the component state
 func (e *editor) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case InsertTextMsg:
+		// Insert text at current cursor position
+		e.textarea.InsertString(msg.Text)
+		return e, nil
+
 	case tea.WindowSizeMsg:
 		e.textarea.SetWidth(msg.Width - 2)
 		return e, nil
+
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "enter":
@@ -71,11 +87,32 @@ func (e *editor) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			value := e.textarea.Value()
 			if value != "" && !e.working {
 				e.textarea.Reset()
+				e.lastCharWasAt = false
 				return e, core.CmdHandler(SendMsg{Content: value})
 			}
 			return e, nil
+
 		case "ctrl+c":
 			return e, tea.Quit
+
+		case "@":
+			// User typed @, trigger file picker
+			e.lastCharWasAt = true
+			e.atSymbolPos = len(e.textarea.Value())
+
+			// First, let textarea handle the @ character
+			var cmd tea.Cmd
+			e.textarea, cmd = e.textarea.Update(msg)
+
+			// Then trigger file picker
+			return e, tea.Batch(cmd, core.CmdHandler(ShowFilePickerMsg{}))
+		}
+	}
+
+	// Reset the @ tracking flag if any other character is typed
+	if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
+		if keyMsg.String() != "@" {
+			e.lastCharWasAt = false
 		}
 	}
 
